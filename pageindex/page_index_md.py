@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import os
+import time
 try:
     from .utils import *
 except:
@@ -241,55 +242,121 @@ def clean_tree_for_output(tree_nodes):
 
 
 async def md_to_tree(md_path, if_thinning=False, min_token_threshold=None, if_add_node_summary='no', summary_token_threshold=None, model=None, if_add_doc_description='no', if_add_node_text='no', if_add_node_id='yes'):
+    step_times = {}  # 记录每个步骤的耗时
+    
+    # Step 1: 读取文件
+    step_start = time.time()
+    print('[Step 1] 读取 Markdown 文件...')
     with open(md_path, 'r', encoding='utf-8') as f:
         markdown_content = f.read()
+    step_times['1. 读取文件'] = time.time() - step_start
+    print(f'[Step 1] 完成, 耗时: {step_times["1. 读取文件"]:.2f} 秒')
     
-    print(f"Extracting nodes from markdown...")
+    # Step 2: 提取标题节点
+    step_start = time.time()
+    print('[Step 2] 提取标题节点...')
     node_list, markdown_lines = extract_nodes_from_markdown(markdown_content)
+    step_times['2. 提取标题节点'] = time.time() - step_start
+    print(f'[Step 2] 完成, 耗时: {step_times["2. 提取标题节点"]:.2f} 秒, 共 {len(node_list)} 个节点')
 
-    print(f"Extracting text content from nodes...")
+    # Step 3: 提取节点文本
+    step_start = time.time()
+    print('[Step 3] 提取节点文本内容...')
     nodes_with_content = extract_node_text_content(node_list, markdown_lines)
+    step_times['3. 提取节点文本'] = time.time() - step_start
+    print(f'[Step 3] 完成, 耗时: {step_times["3. 提取节点文本"]:.2f} 秒')
     
+    # Step 4: 树瘦身 (可选)
     if if_thinning:
+        step_start = time.time()
+        print('[Step 4] 树瘦身处理...')
         nodes_with_content = update_node_list_with_text_token_count(nodes_with_content, model=model)
-        print(f"Thinning nodes...")
         nodes_with_content = tree_thinning_for_index(nodes_with_content, min_token_threshold, model=model)
+        step_times['4. 树瘦身'] = time.time() - step_start
+        print(f'[Step 4] 完成, 耗时: {step_times["4. 树瘦身"]:.2f} 秒, 剩余 {len(nodes_with_content)} 个节点')
     
-    print(f"Building tree from nodes...")
+    # Step 5: 构建树结构
+    step_start = time.time()
+    print('[Step 5] 构建树结构...')
     tree_structure = build_tree_from_nodes(nodes_with_content)
+    step_times['5. 构建树结构'] = time.time() - step_start
+    print(f'[Step 5] 完成, 耗时: {step_times["5. 构建树结构"]:.2f} 秒')
 
+    # Step 6: 添加节点 ID
     if if_add_node_id == 'yes':
+        step_start = time.time()
+        print('[Step 6] 添加节点 ID...')
         write_node_id(tree_structure)
+        step_times['6. 添加节点ID'] = time.time() - step_start
+        print(f'[Step 6] 完成, 耗时: {step_times["6. 添加节点ID"]:.2f} 秒')
 
-    print(f"Formatting tree structure...")
+    # Step 7: 格式化树结构
+    step_start = time.time()
+    print('[Step 7] 格式化树结构...')
     
     if if_add_node_summary == 'yes':
         # Always include text for summary generation
         tree_structure = format_structure(tree_structure, order = ['title', 'node_id', 'summary', 'prefix_summary', 'text', 'line_num', 'nodes'])
+        step_times['7. 格式化树结构'] = time.time() - step_start
+        print(f'[Step 7] 完成, 耗时: {step_times["7. 格式化树结构"]:.2f} 秒')
         
-        print(f"Generating summaries for each node...")
+        # Step 8: 生成节点摘要
+        step_start = time.time()
+        print('[Step 8] 生成节点摘要...')
         tree_structure = await generate_summaries_for_structure_md(tree_structure, summary_token_threshold=summary_token_threshold, model=model)
+        step_times['8. 生成节点摘要'] = time.time() - step_start
+        print(f'[Step 8] 完成, 耗时: {step_times["8. 生成节点摘要"]:.2f} 秒')
         
         if if_add_node_text == 'no':
             # Remove text after summary generation if not requested
             tree_structure = format_structure(tree_structure, order = ['title', 'node_id', 'summary', 'prefix_summary', 'line_num', 'nodes'])
         
         if if_add_doc_description == 'yes':
-            print(f"Generating document description...")
-            # Create a clean structure without unnecessary fields for description generation
+            # Step 9: 生成文档描述
+            step_start = time.time()
+            print('[Step 9] 生成文档描述...')
             clean_structure = create_clean_structure_for_description(tree_structure)
             doc_description = generate_doc_description(clean_structure, model=model)
+            step_times['9. 生成文档描述'] = time.time() - step_start
+            print(f'[Step 9] 完成, 耗时: {step_times["9. 生成文档描述"]:.2f} 秒')
+            
+            # 打印耗时汇总
+            print('\n' + '='*50)
+            print('耗时统计汇总:')
+            for step_name, elapsed in step_times.items():
+                print(f'  {step_name}: {elapsed:.2f} 秒')
+            print(f'  总耗时: {sum(step_times.values()):.2f} 秒')
+            print('='*50 + '\n')
+            
             return {
                 'doc_name': os.path.splitext(os.path.basename(md_path))[0],
                 'doc_description': doc_description,
                 'structure': tree_structure,
             }
+        
+        # 打印耗时汇总
+        print('\n' + '='*50)
+        print('耗时统计汇总:')
+        for step_name, elapsed in step_times.items():
+            print(f'  {step_name}: {elapsed:.2f} 秒')
+        print(f'  总耗时: {sum(step_times.values()):.2f} 秒')
+        print('='*50 + '\n')
     else:
         # No summaries needed, format based on text preference
         if if_add_node_text == 'yes':
             tree_structure = format_structure(tree_structure, order = ['title', 'node_id', 'summary', 'prefix_summary', 'text', 'line_num', 'nodes'])
         else:
             tree_structure = format_structure(tree_structure, order = ['title', 'node_id', 'summary', 'prefix_summary', 'line_num', 'nodes'])
+        step_times['7. 格式化树结构'] = time.time() - step_start
+        print(f'[Step 7] 完成, 耗时: {step_times["7. 格式化树结构"]:.2f} 秒')
+        
+        # 打印耗时汇总
+        print('\n' + '='*50)
+        print('耗时统计汇总:')
+        for step_name, elapsed in step_times.items():
+            print(f'  {step_name}: {elapsed:.2f} 秒')
+        print(f'  总耗时: {sum(step_times.values()):.2f} 秒')
+        print('='*50 + '\n')
     
     return {
         'doc_name': os.path.splitext(os.path.basename(md_path))[0],

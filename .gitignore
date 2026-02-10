@@ -13,3 +13,9 @@ log/*
 logs/
 parts/*
 json_results/*
+
+# 数据集相关
+pdf_data_dir/
+tests/pdfs/
+tests/results/
+*.pdf

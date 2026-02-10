@@ -8,8 +8,8 @@ from pageindex.page_index_md import md_to_tree
 if __name__ == "__main__":
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Process PDF or Markdown document and generate structure')
-    parser.add_argument('--pdf_path', type=str, help='Path to the PDF file',default=r"D:\github_dir\pageindex_project\out_dir\汇总文档v1——no_title.pdf")
-    parser.add_argument('--md_path', type=str, help='Path to the Markdown file')
+    parser.add_argument('--pdf_path', type=str, help='Path to the PDF file')
+    parser.add_argument('--md_path', type=str, help='Path to the Markdown file',default=r"D:\github_dir\pageindex_project\out_dir\汇总文档v1.md")
 
     parser.add_argument('--model', type=str, default='qwen3-max', help='Model to use')
 
@@ -65,13 +65,10 @@ if __name__ == "__main__":
         )
 
         # Process the PDF
-        print(f'[PDF] 开始解析: {args.pdf_path}')
         start_time = time.time()
-        
         toc_with_page_number = page_index_main(args.pdf_path, opt)
-        
-        elapsed_time = time.time() - start_time
-        print(f'[PDF] 解析完成, 耗时: {elapsed_time:.2f} 秒')
+        parse_time = time.time() - start_time
+        print(f'Parsing done in {parse_time:.2f}s, saving to file...')
         
         # Save results
         pdf_name = os.path.splitext(os.path.basename(args.pdf_path))[0]    
@@ -97,9 +94,6 @@ if __name__ == "__main__":
         # Process the markdown
         import asyncio
         
-        print(f'[Markdown] 开始解析: {args.md_path}')
-        start_time = time.time()
-        
         # Use ConfigLoader to get consistent defaults (matching PDF behavior)
         from pageindex.utils import ConfigLoader
         config_loader = ConfigLoader()
@@ -116,6 +110,7 @@ if __name__ == "__main__":
         # Load config with defaults from config.yaml
         opt = config_loader.load(user_opt)
         
+        start_time = time.time()
         toc_with_page_number = asyncio.run(md_to_tree(
             md_path=args.md_path,
             if_thinning=args.if_thinning.lower() == 'yes',
@@ -127,9 +122,9 @@ if __name__ == "__main__":
             if_add_node_text=opt.if_add_node_text,
             if_add_node_id=opt.if_add_node_id
         ))
+        parse_time = time.time() - start_time
         
-        elapsed_time = time.time() - start_time
-        print(f'[Markdown] 解析完成, 耗时: {elapsed_time:.2f} 秒')
+        print(f'Parsing done in {parse_time:.2f}s, saving to file...')
         
         # Save results
         md_name = os.path.splitext(os.path.basename(args.md_path))[0]    
