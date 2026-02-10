@@ -7,6 +7,7 @@ import re
 from .utils import *
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time as time_module
 
 
 ################### check title in page #########################################################
@@ -89,7 +90,10 @@ async def check_title_appearance_in_start_concurrent(structure, page_list, model
             tasks.append(check_title_appearance_in_start(item['title'], page_text, model=model, logger=logger))
             valid_items.append(item)
 
+    print(f'[标题验证] 正在验证 {len(valid_items)} 个标题 (预计 {len(valid_items) * 1.2:.0f} 秒)...')
+    _start = time_module.time()
     results = await asyncio.gather(*tasks, return_exceptions=True)
+    print(f'[标题验证] 完成, 耗时 {time_module.time() - _start:.1f} 秒')
     for item, result in zip(valid_items, results):
         if isinstance(result, Exception):
             if logger:
@@ -926,7 +930,10 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
         check_title_appearance(item, page_list, start_index, model)
         for item in indexed_sample_list
     ]
+    print(f'[TOC验证] 正在验证 {len(tasks)} 个条目 (预计 {len(tasks) * 1.2:.0f} 秒)...')
+    _start = time_module.time()
     results = await asyncio.gather(*tasks)
+    print(f'[TOC验证] 完成, 耗时 {time_module.time() - _start:.1f} 秒')
     
     # Process results
     correct_count = 0
@@ -985,6 +992,16 @@ async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=N
             return await meta_processor(page_list, mode='process_toc_no_page_numbers', toc_content=toc_content, toc_page_list=toc_page_list, start_index=start_index, opt=opt, logger=logger)
         elif mode == 'process_toc_no_page_numbers':
             return await meta_processor(page_list, mode='process_no_toc', start_index=start_index, opt=opt, logger=logger)
+        elif mode == 'process_no_toc':
+            # 当 process_no_toc 模式下准确率仍然很低时，返回空列表让父节点保持原样
+            # 这样可以确保内容不会丢失，只是不再细分子结构
+            logger.info({
+                'mode': 'process_no_toc',
+                'warning': 'Low accuracy, returning empty list to preserve parent node content',
+                'accuracy': accuracy,
+                'toc_count': len(toc_with_page_number)
+            })
+            return []
         else:
             raise Exception('Processing failed')
         
@@ -1098,6 +1115,179 @@ def page_index_main(doc, opt=None):
         }
 
     return asyncio.run(page_index_builder())
+
+
+def txt_index_main(txt_path, opt=None, tokens_per_page=500):
+    """
+    处理 TXT 文件，复用 PDF 的结构提取逻辑。
+    
+    Args:
+        txt_path: TXT 文件路径
+        opt: 配置选项
+        tokens_per_page: 每个虚拟页的目标 token 数量
+    
+    Returns:
+        包含文档结构的字典
+    """
+    logger = JsonLogger(txt_path)
+    
+    if not isinstance(txt_path, str) or not os.path.isfile(txt_path) or not txt_path.lower().endswith(".txt"):
+        raise ValueError("Unsupported input type. Expected a TXT file path.")
+
+    print('Parsing TXT...')
+    page_list = get_txt_page_tokens(txt_path, model=opt.model, tokens_per_page=tokens_per_page)
+
+    logger.info({'total_page_number': len(page_list)})
+    logger.info({'total_token': sum([page[1] for page in page_list])})
+    print(f'TXT 虚拟分页: {len(page_list)} 页, 总 token: {sum([page[1] for page in page_list])}')
+
+    async def txt_index_builder():
+        # TXT 文件没有目录，直接使用 process_no_toc 模式
+        structure = await tree_parser(page_list, opt, doc=txt_path, logger=logger)
+        if opt.if_add_node_id == 'yes':
+            write_node_id(structure)    
+        if opt.if_add_node_text == 'yes':
+            add_node_text(structure, page_list)
+        if opt.if_add_node_summary == 'yes':
+            if opt.if_add_node_text == 'no':
+                add_node_text(structure, page_list)
+            await generate_summaries_for_structure(structure, model=opt.model)
+            if opt.if_add_node_text == 'no':
+                remove_structure_text(structure)
+            if opt.if_add_doc_description == 'yes':
+                clean_structure = create_clean_structure_for_description(structure)
+                doc_description = generate_doc_description(clean_structure, model=opt.model)
+                return {
+                    'doc_name': os.path.basename(txt_path),
+                    'doc_description': doc_description,
+                    'structure': structure,
+                }
+        return {
+            'doc_name': os.path.basename(txt_path),
+            'structure': structure,
+        }
+
+    return asyncio.run(txt_index_builder())
+
+
+def folder_index_main(folder_path, opt=None, tokens_per_page=500, max_tokens_for_subnodes=1024):
+    """
+    处理卷宗文件夹，每个 TXT 文件的文件名作为一个节点。
+    如果单个材料的 token 数超过阈值，则进一步提取子节点。
+    
+    Args:
+        folder_path: 卷宗文件夹路径
+        opt: 配置选项
+        tokens_per_page: 每个虚拟页的目标 token 数量
+        max_tokens_for_subnodes: 超过此 token 数的材料需要进一步提取子节点
+    
+    Returns:
+        包含文档结构的字典
+    """
+    import glob
+    import tiktoken
+    logger = JsonLogger(folder_path)
+    
+    if not isinstance(folder_path, str) or not os.path.isdir(folder_path):
+        raise ValueError("Unsupported input type. Expected a folder path.")
+    
+    # 获取所有 TXT 文件
+    txt_files = sorted(glob.glob(os.path.join(folder_path, "*.txt")))
+    if not txt_files:
+        raise ValueError(f"No TXT files found in folder: {folder_path}")
+    
+    print(f'[Folder] 发现 {len(txt_files)} 个 TXT 文件')
+    
+    try:
+        enc = tiktoken.encoding_for_model(opt.model)
+    except KeyError:
+        enc = tiktoken.get_encoding("cl100k_base")
+    
+    # 构建初始结构：每个文件作为一个节点
+    structure = []
+    total_tokens = 0
+    files_need_subnodes = []
+    
+    for txt_file in txt_files:
+        file_name = os.path.splitext(os.path.basename(txt_file))[0]
+        with open(txt_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+        token_count = len(enc.encode(content))
+        total_tokens += token_count
+        
+        node = {
+            'title': file_name,
+            'text': content,
+            'token_count': token_count,
+            'source_file': txt_file,
+        }
+        structure.append(node)
+        
+        if token_count > max_tokens_for_subnodes:
+            files_need_subnodes.append((txt_file, file_name, token_count))
+    
+    print(f'[Folder] 总 token 数: {total_tokens}')
+    print(f'[Folder] 需要提取子节点的文件: {len(files_need_subnodes)} 个')
+    
+    logger.info({
+        'total_files': len(txt_files),
+        'total_tokens': total_tokens,
+        'files_need_subnodes': len(files_need_subnodes)
+    })
+    
+    async def folder_index_builder():
+        # 对需要提取子节点的文件进行处理
+        for txt_file, file_name, token_count in files_need_subnodes:
+            print(f'[Folder] 正在为 "{file_name}" 提取子节点 (token: {token_count})...')
+            
+            # 获取虚拟分页
+            page_list = get_txt_page_tokens(txt_file, model=opt.model, tokens_per_page=tokens_per_page)
+            
+            if len(page_list) > 1:
+                # 使用 tree_parser 提取子结构
+                sub_structure = await tree_parser(page_list, opt, doc=txt_file, logger=logger)
+                
+                # 找到对应的节点并添加子节点
+                for node in structure:
+                    if node.get('source_file') == txt_file:
+                        if sub_structure:
+                            add_node_text(sub_structure, page_list)
+                            node['nodes'] = sub_structure
+                        break
+        
+        # 添加 node_id
+        if opt.if_add_node_id == 'yes':
+            write_node_id(structure)
+        
+        # 生成摘要
+        if opt.if_add_node_summary == 'yes':
+            await generate_summaries_for_structure(structure, model=opt.model)
+        
+        # 清理临时字段
+        for node in structure:
+            node.pop('token_count', None)
+            node.pop('source_file', None)
+            if opt.if_add_node_text == 'no':
+                node.pop('text', None)
+                if 'nodes' in node:
+                    remove_structure_text(node['nodes'])
+        
+        # 生成文档描述
+        if opt.if_add_doc_description == 'yes':
+            clean_structure = create_clean_structure_for_description(structure)
+            doc_description = generate_doc_description(clean_structure, model=opt.model)
+            return {
+                'doc_name': os.path.basename(folder_path),
+                'doc_description': doc_description,
+                'structure': structure,
+            }
+        
+        return {
+            'doc_name': os.path.basename(folder_path),
+            'structure': structure,
+        }
+    
+    return asyncio.run(folder_index_builder())
 
 
 def page_index(doc, model=None, toc_check_page_num=None, max_page_num_each_node=None, max_token_num_each_node=None,

@@ -7,21 +7,29 @@ from pageindex.page_index_md import md_to_tree
 
 if __name__ == "__main__":
     # Set up argument parser
-    pdf_path=r"D:\github_dir\pageindex_project\out_dir\汇总文档v1——no_title_2048.pdf"
+    folder_path="D:\github_dir\pageindex_project\三人八起"
    
    
-    parser = argparse.ArgumentParser(description='Process PDF or Markdown document and generate structure')
-    parser.add_argument('--pdf_path', type=str, help='Path to the PDF file',default=pdf_path)
+    parser = argparse.ArgumentParser(description='Process PDF, TXT or Markdown document and generate structure')
+    parser.add_argument('--pdf_path', type=str, help='Path to the PDF file')
+    parser.add_argument('--txt_path', type=str, help='Path to the TXT file')
+    parser.add_argument('--folder_path', type=str, help='Path to a folder containing TXT files (case folder)',default=folder_path)
     parser.add_argument('--md_path', type=str, help='Path to the Markdown file')
 
     parser.add_argument('--model', type=str, default='qwen3-max', help='Model to use')
 
-    parser.add_argument('--toc-check-pages', type=int, default=5, 
+    parser.add_argument('--toc-check-pages', type=int, default=20, 
                       help='Number of pages to check for table of contents (PDF only)')
-    parser.add_argument('--max-pages-per-node', type=int, default=0,
+    parser.add_argument('--max-pages-per-node', type=int, default=10,
                       help='Maximum number of pages per node (PDF only)')
-    parser.add_argument('--max-tokens-per-node', type=int, default=1024,
+    parser.add_argument('--max-tokens-per-node', type=int, default=20000,
                       help='Maximum number of tokens per node (PDF only)')
+    
+    # TXT/Folder specific arguments
+    parser.add_argument('--tokens-per-page', type=int, default=500,
+                      help='Target tokens per virtual page for TXT files (TXT only)')
+    parser.add_argument('--max-tokens-for-subnodes', type=int, default=1024,
+                      help='Max tokens threshold for extracting subnodes (Folder only)')
 
     parser.add_argument('--if-add-node-id', type=str, default='yes',
                       help='Whether to add node id to the node')
@@ -42,19 +50,101 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Validate that exactly one file type is specified
-    # if not args.pdf_path and not args.md_path:
-    #     raise ValueError("Either --pdf_path or --md_path must be specified")
-    # if args.pdf_path and args.md_path:
-    #     raise ValueError("Only one of --pdf_path or --md_path can be specified")
+    if args.pdf_path and args.md_path:
+        raise ValueError("Only one of --pdf_path or --md_path can be specified")
     
-    if args.pdf_path:
+    # Folder takes highest priority if specified
+    if args.folder_path:
+        # Validate folder
+        if not os.path.isdir(args.folder_path):
+            raise ValueError(f"Folder not found: {args.folder_path}")
+            
+        # Configure options
+        opt = config(
+            model=args.model,
+            toc_check_page_num=args.toc_check_pages,
+            max_page_num_each_node=args.max_pages_per_node,
+            max_token_num_each_node=args.max_tokens_per_node,
+            if_add_node_id=args.if_add_node_id,
+            if_add_node_summary=args.if_add_node_summary,
+            if_add_doc_description=args.if_add_doc_description,
+            if_add_node_text=args.if_add_node_text
+        )
+
+        # Process the folder
+        print(f'[Folder] 开始解析卷宗: {args.folder_path}')
+        start_time = time.time()
+        
+        from pageindex.page_index import folder_index_main
+        toc_with_page_number = folder_index_main(
+            args.folder_path, 
+            opt, 
+            tokens_per_page=args.tokens_per_page,
+            max_tokens_for_subnodes=args.max_tokens_for_subnodes
+        )
+        
+        elapsed_time = time.time() - start_time
+        print(f'[Folder] 解析完成, 耗时: {elapsed_time:.2f} 秒')
+        
+        # Save results
+        folder_name = os.path.basename(args.folder_path.rstrip('/\\'))
+        output_dir = './results'
+        output_file = f'{output_dir}/{folder_name}_structure.json'
+        os.makedirs(output_dir, exist_ok=True)
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(toc_with_page_number, f, indent=2, ensure_ascii=False)
+        
+        print(f'Tree structure saved to: {output_file}')
+    
+    # TXT takes priority if specified
+    elif args.txt_path:
+        # Validate TXT file
+        if not args.txt_path.lower().endswith('.txt'):
+            raise ValueError("TXT file must have .txt extension")
+        if not os.path.isfile(args.txt_path):
+            raise ValueError(f"TXT file not found: {args.txt_path}")
+            
+        # Configure options
+        opt = config(
+            model=args.model,
+            toc_check_page_num=args.toc_check_pages,
+            max_page_num_each_node=args.max_pages_per_node,
+            max_token_num_each_node=args.max_tokens_per_node,
+            if_add_node_id=args.if_add_node_id,
+            if_add_node_summary=args.if_add_node_summary,
+            if_add_doc_description=args.if_add_doc_description,
+            if_add_node_text=args.if_add_node_text
+        )
+
+        # Process the TXT
+        print(f'[TXT] 开始解析: {args.txt_path}')
+        start_time = time.time()
+        
+        from pageindex.page_index import txt_index_main
+        toc_with_page_number = txt_index_main(args.txt_path, opt, tokens_per_page=args.tokens_per_page)
+        
+        elapsed_time = time.time() - start_time
+        print(f'[TXT] 解析完成, 耗时: {elapsed_time:.2f} 秒')
+        
+        # Save results
+        txt_name = os.path.splitext(os.path.basename(args.txt_path))[0]    
+        output_dir = './results'
+        output_file = f'{output_dir}/{txt_name}_structure.json'
+        os.makedirs(output_dir, exist_ok=True)
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(toc_with_page_number, f, indent=2, ensure_ascii=False)
+        
+        print(f'Tree structure saved to: {output_file}')
+            
+    elif args.pdf_path:
         # Validate PDF file
         if not args.pdf_path.lower().endswith('.pdf'):
             raise ValueError("PDF file must have .pdf extension")
         if not os.path.isfile(args.pdf_path):
             raise ValueError(f"PDF file not found: {args.pdf_path}")
             
-        # Process PDF file
         # Configure options
         opt = config(
             model=args.model,

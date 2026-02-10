@@ -17,6 +17,8 @@ import logging
 import yaml
 from pathlib import Path
 from types import SimpleNamespace as config
+from tqdm.asyncio import tqdm_asyncio
+from tqdm import tqdm
 
 CHATGPT_API_KEY = os.getenv("CHATGPT_API_KEY")
 BASE_URL = os.getenv("BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
@@ -416,6 +418,76 @@ def add_preface_if_needed(data):
 
 
 
+def get_txt_page_tokens(txt_path, model="gpt-4o-2024-11-20", tokens_per_page=500):
+    """
+    将 TXT 文件按 token 数量虚拟分页，模拟 PDF 的 page_list 结构。
+    
+    Args:
+        txt_path: TXT 文件路径
+        model: 用于 tokenization 的模型
+        tokens_per_page: 每个虚拟页的目标 token 数量
+    
+    Returns:
+        page_list: [(page_text, token_count), ...]
+    """
+    try:
+        enc = tiktoken.encoding_for_model(model)
+    except KeyError:
+        enc = tiktoken.get_encoding("cl100k_base")
+    
+    # 读取文件内容
+    with open(txt_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # 按段落分割（保留自然边界）
+    paragraphs = content.split('\n\n')
+    
+    page_list = []
+    current_page_text = ""
+    current_token_count = 0
+    
+    for para in paragraphs:
+        para_with_sep = para + '\n\n'
+        para_tokens = len(enc.encode(para_with_sep))
+        
+        # 如果单个段落超过目标 token 数，按句子进一步分割
+        if para_tokens > tokens_per_page:
+            # 先保存当前页
+            if current_page_text.strip():
+                page_list.append((current_page_text.strip(), current_token_count))
+                current_page_text = ""
+                current_token_count = 0
+            
+            # 按句子分割大段落
+            sentences = para.replace('。', '。\n').replace('！', '！\n').replace('？', '？\n').replace('. ', '.\n').split('\n')
+            for sent in sentences:
+                if not sent.strip():
+                    continue
+                sent_tokens = len(enc.encode(sent))
+                if current_token_count + sent_tokens > tokens_per_page and current_page_text.strip():
+                    page_list.append((current_page_text.strip(), current_token_count))
+                    current_page_text = sent
+                    current_token_count = sent_tokens
+                else:
+                    current_page_text += sent
+                    current_token_count += sent_tokens
+        else:
+            # 正常累积段落
+            if current_token_count + para_tokens > tokens_per_page and current_page_text.strip():
+                page_list.append((current_page_text.strip(), current_token_count))
+                current_page_text = para_with_sep
+                current_token_count = para_tokens
+            else:
+                current_page_text += para_with_sep
+                current_token_count += para_tokens
+    
+    # 添加最后一页
+    if current_page_text.strip():
+        page_list.append((current_page_text.strip(), current_token_count))
+    
+    return page_list
+
+
 def get_page_tokens(pdf_path, model="gpt-4o-2024-11-20", pdf_parser="PyPDF2"):
     try:
         enc = tiktoken.encoding_for_model(model)
@@ -624,12 +696,18 @@ async def generate_node_summary(node, model=None):
 
 
 async def generate_summaries_for_structure(structure, model=None):
+    import time as time_module
     nodes = structure_to_list(structure)
+    print(f'[Summary] 正在为 {len(nodes)} 个节点生成摘要 (预计 {len(nodes) * 1.5:.0f} 秒)...')
     tasks = [generate_node_summary(node, model=model) for node in nodes]
-    summaries = await asyncio.gather(*tasks)
-    
+    _start = time_module.time()
+    summaries = await asyncio.gather(*tasks, return_exceptions=True)
+    print(f'[Summary] 完成, 耗时 {time_module.time() - _start:.1f} 秒')
     for node, summary in zip(nodes, summaries):
-        node['summary'] = summary
+        if isinstance(summary, Exception):
+            print(f"Error generating summary for node {node.get('node_id', 'unknown')}: {summary}")
+        else:
+            node['summary'] = summary
     return structure
 
 
